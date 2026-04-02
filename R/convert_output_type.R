@@ -117,12 +117,13 @@ convert_single_output_type <- function(to_output_type, to, model_out_tbl) {
     transform_fun <- match.fun(to_output_type)
     purrr::map_dbl(output_tbl$value, transform_fun)
   } else if (to_output_type == "quantile") {
-    purrr::map_dbl(
-      seq_len(nrow(output_tbl)),
-      function(i) {
+    purrr::map2_dbl(
+      output_tbl$value,
+      output_tbl$output_type_id,
+      \(value, probs) {
         stats::quantile(
-          output_tbl$value[[i]],
-          probs = output_tbl$output_type_id[[i]],
+          value,
+          probs = probs,
           names = FALSE
         )
       }

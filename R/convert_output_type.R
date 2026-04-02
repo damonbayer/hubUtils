@@ -77,45 +77,54 @@ convert_single_output_type <- function(to_output_type, to, model_out_tbl) {
   to_output_type_id <- to[[to_output_type]]
   group_cols <- c("model_id", task_id_cols)
   join_cols <- task_id_cols[task_id_cols %in% colnames(to_output_type_id)]
-  grouped_values <- model_out_tbl |>
-    dplyr::group_by(dplyr::across(dplyr::all_of(group_cols))) |>
-    dplyr::summarise(value = list(.data[["value"]]), .groups = "drop")
-  output_tbl <- if (length(join_cols) > 0L) {
-    grouped_values |>
-      dplyr::left_join(
-        to_output_type_id,
-        by = join_cols,
-        relationship = "many-to-many"
-      )
+  transform_fun <- match.fun(to_output_type)
+
+  output_tbl <- if (length(join_cols) == 0L) {
+    probs <- to_output_type_id$output_type_id
+    if (to_output_type %in% c("mean", "median")) {
+      model_out_tbl |>
+        dplyr::group_by(dplyr::across(dplyr::all_of(group_cols))) |>
+        dplyr::summarise(value = transform_fun(.data[["value"]]), .groups = "drop") |>
+        dplyr::mutate(output_type_id = probs, .before = "value")
+    } else {
+      model_out_tbl |>
+        dplyr::group_by(dplyr::across(dplyr::all_of(group_cols))) |>
+        dplyr::reframe(
+          output_type_id = probs,
+          value = stats::quantile(.data[["value"]], probs = probs, names = FALSE)
+        )
+    }
   } else {
-    n_groups <- nrow(grouped_values)
-    n_otids <- nrow(to_output_type_id)
-    grouped_values[
-      rep(seq_len(n_groups), each = n_otids),
-      ,
-      drop = FALSE
-    ] |>
-      dplyr::mutate(
-        output_type_id = rep(to_output_type_id$output_type_id, times = n_groups)
+    joined_tbl <- model_out_tbl |>
+      dplyr::group_by(dplyr::across(dplyr::all_of(group_cols))) |>
+      dplyr::summarise(value = list(.data[["value"]]), .groups = "drop") |>
+      dplyr::left_join(
+        to_output_type_id |>
+          dplyr::group_by(dplyr::across(dplyr::all_of(join_cols))) |>
+          dplyr::summarise(
+            output_type_id = list(.data[["output_type_id"]]),
+            .groups = "drop"
+          ),
+        by = join_cols,
+        relationship = "many-to-one"
       )
+
+    purrr::map_dfr(seq_len(nrow(joined_tbl)), \(i) {
+      probs <- joined_tbl$output_type_id[[i]]
+      values <- joined_tbl$value[[i]]
+      out <- joined_tbl[rep(i, length(probs)), group_cols, drop = FALSE]
+      out$output_type_id <- probs
+      out$value <- if (to_output_type %in% c("mean", "median")) {
+        rep(transform_fun(values), length(probs))
+      } else {
+        stats::quantile(values, probs = probs, names = FALSE)
+      }
+      out
+    })
   }
 
   output_tbl |>
-    dplyr::mutate(
-      value = if (to_output_type %in% c("mean", "median")) {
-        purrr::map_dbl(.data[["value"]], match.fun(to_output_type))
-      } else {
-        purrr::map2_dbl(
-          .data[["value"]],
-          .data[["output_type_id"]],
-          \(value, probs) stats::quantile(value, probs = probs, names = FALSE)
-        )
-      }
-    ) |>
-    dplyr::mutate(
-      output_type = to_output_type,
-      .before = "output_type_id"
-    ) |>
+    dplyr::mutate(output_type = to_output_type, .before = "output_type_id") |>
     dplyr::select(dplyr::all_of(model_out_cols))
 }
 

@@ -75,50 +75,67 @@ convert_single_output_type <- function(to_output_type, to, model_out_tbl) {
   model_out_cols <- colnames(model_out_tbl)
   task_id_cols <- subset_task_id_names(model_out_cols)
   to_output_type_id <- to[[to_output_type]]
-  otid_cols <- "output_type_id"
-
-  if (to_output_type %in% c("mean", "median")) {
-    transform_fun <- match.fun(to_output_type)
-    transform_args <- list(x = quote(.data[["value"]]))
-  } else if (to_output_type == "quantile") {
-    transform_fun <- stats::quantile
-    transform_args <- list(
-      x = quote(.data[["value"]]),
-      probs = quote(unique(.data[["output_type_id"]])),
-      names = FALSE
-    )
-  }
+  group_cols <- c("model_id", task_id_cols)
 
   # if overlapping task ID cols provided, join model_out_tbl with to_output_type_id
-  # else, cross-join to avoid warnings (vector to_output_type_id elements
-  #   are coerced to data frames during validation)
+  # else, repeat output_type_id values for each unique model/task-id group
   join_cols <- task_id_cols[task_id_cols %in% colnames(to_output_type_id)]
-  if (length(join_cols) > 0) {
-    model_out_tbl <- model_out_tbl |>
-      dplyr::select(-c("output_type", "output_type_id")) |>
+  value_by_group <- model_out_tbl |>
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_cols))) |>
+    dplyr::summarise(value = list(.data[["value"]]), .groups = "drop")
+  output_spec <- dplyr::select(value_by_group, -"value")
+
+  if (length(join_cols) > 0L) {
+    output_spec <- output_spec |>
       dplyr::left_join(
         to_output_type_id,
         by = join_cols,
         relationship = "many-to-many"
       )
   } else {
-    model_out_tbl <- model_out_tbl |>
-      dplyr::select(-c("output_type", "output_type_id")) |>
-      dplyr::cross_join(to_output_type_id)
+    n_groups <- nrow(output_spec)
+    n_otids <- nrow(to_output_type_id)
+    output_spec <- output_spec[
+      rep(seq_len(n_groups), each = n_otids),
+      ,
+      drop = FALSE
+    ]
+    output_spec$output_type_id <- rep(
+      to_output_type_id$output_type_id,
+      times = n_groups
+    )
   }
 
-  # compute prediction values, clean up included columns
-  model_out_tbl |>
-    dplyr::group_by(dplyr::across(dplyr::all_of(c(
-      "model_id",
-      task_id_cols,
-      otid_cols
-    )))) |>
-    dplyr::reframe(value = do.call(transform_fun, args = transform_args)) |>
+  output_tbl <- output_spec |>
+    dplyr::left_join(
+      value_by_group,
+      by = group_cols,
+      relationship = "many-to-one"
+    )
+
+  transformed_value <- if (to_output_type %in% c("mean", "median")) {
+    transform_fun <- match.fun(to_output_type)
+    purrr::map_dbl(output_tbl$value, transform_fun)
+  } else if (to_output_type == "quantile") {
+    purrr::map_dbl(
+      seq_len(nrow(output_tbl)),
+      function(i) {
+        stats::quantile(
+          output_tbl$value[[i]],
+          probs = output_tbl$output_type_id[[i]],
+          names = FALSE
+        )
+      }
+    )
+  }
+
+  output_tbl |>
     dplyr::mutate(
       output_type = to_output_type,
       .before = "output_type_id"
     ) |>
+    dplyr::select(-"value") |>
+    dplyr::mutate(value = transformed_value) |>
     dplyr::select(dplyr::all_of(model_out_cols))
 }
 
